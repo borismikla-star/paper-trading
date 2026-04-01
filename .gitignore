@@ -1,0 +1,9 @@
+# NIKDY nepushuj tieto súbory!
+.env
+*.log
+*.jsonl
+__pycache__/
+*.pyc
+.DS_Store
+venv/
+.venv/
