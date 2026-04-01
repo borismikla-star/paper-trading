@@ -57,6 +57,7 @@ from step19_decision_audit import (
     DecisionAuditor, DecisionAuditEntry, TransitionAuditEntry,
     ActionAuditEntry, ActionType, TransitionDomain
 )
+from dashboard import start_dashboard, update_state
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -132,6 +133,9 @@ class PaperTradingBot:
         self._peak_value    = BASE_CAPITAL
         self._last_ws_ts    = time.time()
         self._started_at    = datetime.now()
+
+        # Dashboard
+        start_dashboard(port=int(os.getenv("PORT", "8080")))
 
         log.info("✅ PaperTradingBot pripravený")
 
@@ -254,7 +258,30 @@ class PaperTradingBot:
         )
         outcome = self.engine.decide(inputs)
 
-        # 7. Audit
+        # 7. Audit + dashboard update
+        uptime = int((datetime.now() - self._started_at).total_seconds())
+        pnl_usdt = pv - BASE_CAPITAL
+        update_state(
+            status        = "RUNNING",
+            tick          = self._tick,
+            price         = price,
+            portfolio     = round(pv, 2),
+            base_capital  = BASE_CAPITAL,
+            pnl_usdt      = round(pnl_usdt, 4),
+            pnl_pct       = round(pnl_usdt / BASE_CAPITAL * 100, 3),
+            unrealized_pnl= round(self.tracker.unrealized_pnl(price), 4),
+            coin_balance  = round(self.tracker.coin_balance, 6),
+            regime        = regime_dec.effective_regime.value,
+            regime_conf   = round(regime_dec.confidence, 3),
+            exec_state    = exec_dec.state.value,
+            port_risk     = port_dec.mode.value,
+            winner        = outcome.winning_layer.value,
+            allow_trading = outcome.allow_trading,
+            allow_buys    = outcome.allow_new_buys,
+            uptime_sec    = uptime,
+            daily_target  = DAILY_TARGET_USDT,
+            test_mode     = TEST_MODE,
+        )
         self.auditor.log_decision(DecisionAuditEntry(
             tick=self._tick, symbol=SYMBOL,
             exec_state=exec_dec.state.value,
