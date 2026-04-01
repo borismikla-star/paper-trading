@@ -1,24 +1,7 @@
 """
 APEX BOT — Paper Trading Main Loop
 ====================================
-Produkčný vstupný bod pre Railway nasadenie.
-
-Spúšťa:
-  1. Pre-flight gate (parity + invariant + E2E testy)
-  2. Paper trading loop s plnou decision engine integráciou
-  3. Audit logging každého rozhodnutia
-
-Prostredie (Railway Variables):
-  BINANCE_API_KEY, BINANCE_API_SECRET
-  SYMBOL              = BNB/USDT
-  TEST_MODE           = true          ← paper trading
-  GRID_LEVELS         = 8
-  GRID_STEP_PCT       = 1.2
-  ORDER_AMOUNT_USDT   = 15
-  LOOP_INTERVAL_SEC   = 60
-  TELEGRAM_BOT_TOKEN  = (voliteľné)
-  TELEGRAM_CHAT_ID    = (voliteľné)
-  SKIP_PREFLIGHT      = false         ← nastaviť true len pre debug
+Railway deployment entry point.
 """
 
 from __future__ import annotations
@@ -33,7 +16,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -46,57 +28,67 @@ logging.basicConfig(
 log = logging.getLogger("ApexBot")
 
 # ── Konfigurácia ──────────────────────────────────────────────────────────────
-SYMBOL             = os.getenv("SYMBOL",            "BNB/USDT")
-TEST_MODE          = os.getenv("TEST_MODE",          "true").lower() == "true"
-LOOP_INTERVAL_SEC  = int(os.getenv("LOOP_INTERVAL_SEC",  "60"))
-GRID_LEVELS        = int(os.getenv("GRID_LEVELS",        "8"))
-GRID_STEP_PCT      = float(os.getenv("GRID_STEP_PCT",    "1.2"))
-ORDER_AMOUNT_USDT  = float(os.getenv("ORDER_AMOUNT_USDT","15"))
-STOP_LOSS_PCT      = float(os.getenv("STOP_LOSS_PCT",    "8.0"))
-DAILY_TARGET_USDT  = float(os.getenv("DAILY_TARGET",     "100"))
-BASE_CAPITAL       = float(os.getenv("BASE_CAPITAL",     "10000"))
-SKIP_PREFLIGHT     = os.getenv("SKIP_PREFLIGHT",    "false").lower() == "true"
-SESSION_LOG        = os.getenv("SESSION_LOG",        "paper_session.jsonl")
+SYMBOL            = os.getenv("SYMBOL",            "BNB/USDT")
+TEST_MODE         = os.getenv("TEST_MODE",          "true").lower() == "true"
+LOOP_INTERVAL_SEC = int(os.getenv("LOOP_INTERVAL_SEC",  "60"))
+GRID_LEVELS       = int(os.getenv("GRID_LEVELS",        "8"))
+GRID_STEP_PCT     = float(os.getenv("GRID_STEP_PCT",    "1.2"))
+ORDER_AMOUNT_USDT = float(os.getenv("ORDER_AMOUNT_USDT","15"))
+STOP_LOSS_PCT     = float(os.getenv("STOP_LOSS_PCT",    "8.0"))
+DAILY_TARGET_USDT = float(os.getenv("DAILY_TARGET",     "100"))
+BASE_CAPITAL      = float(os.getenv("BASE_CAPITAL",     "10000"))
+SKIP_PREFLIGHT    = os.getenv("SKIP_PREFLIGHT",    "false").lower() == "true"
+SESSION_LOG       = os.getenv("SESSION_LOG",        "paper_session.jsonl")
+
+# ── Globálne importy (raz pri štarte) ────────────────────────────────────────
+from step1_core import create_bot_stack, BinanceConnection
+from step10_market_regime_v2 import RegimeDetector, RegimeConfig
+from step11_portfolio_risk import (
+    PortfolioRiskEngine, PortfolioRiskConfig, PortfolioRiskSnapshot
+)
+from step12_inventory_risk import (
+    InventoryRiskManager, InventoryConfig, InventorySnapshot
+)
+from step13_execution_safety_v2 import (
+    ExecutionSafetyController, ExecutionSafetyConfig, ExecutionSnapshot
+)
+from step15_decision_engine import DecisionEngine, DecisionInputs
+from step19_decision_audit import (
+    DecisionAuditor, DecisionAuditEntry, TransitionAuditEntry,
+    ActionAuditEntry, ActionType, TransitionDomain
+)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE 1: PRE-FLIGHT GATE
+# PRE-FLIGHT GATE
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_preflight() -> bool:
-    """
-    Spustí parity audit + invariant testy + E2E scenáre.
-    Vráti True ak všetko prešlo, False ak hard blocker.
-    """
     from step17_parity_audit import RuntimeSpecParityAuditor, ParityAuditConfig
     from step16_system_spec  import InvariantTestSuite
     from step18_e2e_scenarios import ScenarioRunner, ScenarioConfig
     from step19_decision_audit import PaperTradingGate
 
     log.info("=" * 60)
-    log.info("  PRE-FLIGHT GATE — spúšťam overenie systému")
+    log.info("  PRE-FLIGHT GATE")
     log.info("=" * 60)
 
     gate = PaperTradingGate()
 
-    # 1. Parity audit
-    log.info("[Gate 1/3] Parity audit...")
+    log.info("[1/3] Parity audit...")
     parity = RuntimeSpecParityAuditor(ParityAuditConfig(log_each_check=False)).run()
     gate.check_parity(parity)
     log.info(f"  {'✅' if parity.all_ok else '❌'} {parity.summary}")
 
-    # 2. Invariant testy
-    log.info("[Gate 2/3] Invariant tests...")
-    suite    = InvariantTestSuite()
-    inv_res  = suite.run_all()
+    log.info("[2/3] Invariant tests...")
+    inv_res = InvariantTestSuite().run_all()
     gate.check_invariants(inv_res)
-    log.info(f"  {'✅' if inv_res['failed'] == 0 else '❌'} {inv_res['passed']}/{inv_res['total']} passed")
+    log.info(f"  {'✅' if inv_res['failed']==0 else '❌'} {inv_res['passed']}/{inv_res['total']}")
 
-    # 3. E2E scenáre
-    log.info("[Gate 3/3] E2E scenarios...")
-    runner  = ScenarioRunner(ScenarioConfig(log_details=False))
-    e2e_res = runner.run_all()
+    log.info("[3/3] E2E scenarios...")
+    e2e_res = ScenarioRunner(ScenarioConfig(log_details=False)).run_all()
     gate.check_e2e(e2e_res)
-    log.info(f"  {'✅' if e2e_res['all_passed'] else '⚠️'} {e2e_res['passed']}/{len(e2e_res['results'])} passed")
+    log.info(f"  {'✅' if e2e_res['all_passed'] else '⚠️'} {e2e_res['passed']}/{len(e2e_res['results'])}")
 
     passed, report = gate.evaluate()
     log.info(report)
@@ -104,146 +96,87 @@ def run_preflight() -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE 2: PAPER TRADING LOOP
+# PAPER TRADING BOT
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PaperTradingBot:
-    """
-    Kompletný paper trading bot s integrovanou decision engine.
-
-    Tick pipeline:
-      1. Získaj cenu + klines z Binance (read-only)
-      2. Vyhodnoť execution safety
-      3. Vyhodnoť market regime
-      4. Vyhodnoť portfolio risk
-      5. Vyhodnoť inventory risk
-      6. Vyhodnoť volatility scaling
-      7. Central decision engine → DecisionOutcome
-      8. PaperTracker simuluje obchody
-      9. ProfitManager sleduje denný zisk
-     10. Audit logging každého rozhodnutia
-     11. Guardian heartbeat + Telegram notifikácie
-    """
 
     def __init__(self):
         log.info(f"Inicializujem PaperTradingBot | symbol={SYMBOL} | test_mode={TEST_MODE}")
 
-        # ── Core imports ──────────────────────────────────────────────────────
-        from step1_core import (
-            BinanceConnection, PrecisionManager, SymbolConfig, create_bot_stack
-        )
-        from step2_grid_engine import GridEngine, OrderStatus
-        from step10_market_regime_v2 import RegimeDetector, RegimeConfig
-        from step11_portfolio_risk import PortfolioRiskEngine, PortfolioRiskConfig, PortfolioRiskSnapshot
-        from step12_inventory_risk import InventoryRiskManager, InventoryConfig, InventorySnapshot
-        from step13_execution_safety_v2 import (
-            ExecutionSafetyController, ExecutionSafetyConfig, ExecutionSnapshot
-        )
-        from step15_decision_engine import DecisionEngine, DecisionInputs
-        from step19_decision_audit import (
-            DecisionAuditor, DecisionAuditEntry, TransitionAuditEntry,
-            ActionAuditEntry, ActionType, TransitionDomain
-        )
-        # ── Inicializácia modulov ─────────────────────────────────────────────
         self.precision, self.tracker, self.executor = create_bot_stack(
             sym=SYMBOL, mode=TEST_MODE, starting_usdt=BASE_CAPITAL
         )
-        self.cfg_sym      = self.precision.cfg
-
-        self.regime_det   = RegimeDetector(RegimeConfig(
+        self.cfg_sym    = self.precision.cfg
+        self.regime_det = RegimeDetector(RegimeConfig(
             min_bars=55, persistence_ticks=3, cooldown_ticks=4,
             smoothing_alpha=0.20, panic_conf_override=0.65,
         ))
-        self.port_risk    = PortfolioRiskEngine(PortfolioRiskConfig())
-        self.inv_manager  = InventoryRiskManager(InventoryConfig())
-        self.exec_ctrl    = ExecutionSafetyController(ExecutionSafetyConfig())
-        self.engine       = DecisionEngine()
-        self.auditor      = DecisionAuditor(SESSION_LOG, symbol=SYMBOL)
+        self.port_risk  = PortfolioRiskEngine(PortfolioRiskConfig())
+        self.inv_mgr    = InventoryRiskManager(InventoryConfig())
+        self.exec_ctrl  = ExecutionSafetyController(ExecutionSafetyConfig())
+        self.engine     = DecisionEngine()
+        self.auditor    = DecisionAuditor(SESSION_LOG, symbol=SYMBOL)
 
-        # Binance connection (read-only pre paper trading)
+        # Binance (read-only)
         try:
-            from step1_core import BinanceConnection
             self.conn = BinanceConnection(SYMBOL)
             log.info(f"✅ Binance connected | {self.cfg_sym}")
         except Exception as e:
-            log.error(f"Binance connection failed: {e}")
+            log.warning(f"Binance offline — demo mode | {e}")
             self.conn = None
 
-        # State tracking
         self._tick          = 0
         self._running       = True
         self._last_regime   = "UNDEFINED"
-        self._prev_port_mode= "NORMAL"
-        self._started_at    = datetime.now()
         self._peak_value    = BASE_CAPITAL
-        self._reject_streak = 0
         self._last_ws_ts    = time.time()
+        self._started_at    = datetime.now()
 
-        log.info("✅ PaperTradingBot inicializovaný")
-
-    # ── Hlavný loop ───────────────────────────────────────────────────────────
+        log.info("✅ PaperTradingBot pripravený")
 
     def run(self):
         log.info(f"🚀 Paper trading štart | {SYMBOL} | interval={LOOP_INTERVAL_SEC}s")
-        self.auditor.log_action(ActionAuditEntry(
-            tick=0, action_type=ActionType.HEARTBEAT.value,
-            symbol=SYMBOL, reason="PAPER_TRADING_START",
-            detail=f"base_capital={BASE_CAPITAL} daily_target={DAILY_TARGET_USDT}",
-        ))
-
         while self._running:
             try:
                 self._tick += 1
                 self._process_tick()
             except KeyboardInterrupt:
-                log.info("Zastavené používateľom (Ctrl+C)")
                 self._shutdown()
                 break
             except Exception as e:
                 log.error(f"Tick {self._tick} chyba: {e}")
                 log.debug(traceback.format_exc())
                 time.sleep(10)
-
             self._sleep(LOOP_INTERVAL_SEC)
-
-    # ── Jeden tick ────────────────────────────────────────────────────────────
 
     def _process_tick(self):
         now = time.time()
 
-        # ── 1. Market data ────────────────────────────────────────────────────
+        # 1. Market data
         price, klines = self._fetch_market_data()
         if price is None:
-            log.warning(f"Tick {self._tick}: Nedostupné dáta — preskakujem")
+            log.warning(f"Tick {self._tick}: Nedostupné dáta")
             self.auditor.skip_trading(self._tick, "MARKET_DATA_UNAVAILABLE")
             return
 
-        # ── 2. Execution safety ───────────────────────────────────────────────
+        # 2. Execution safety
         exec_snap = ExecutionSnapshot(
-            now_ts=now,
-            last_market_data_ts=now - 5,   # price bol práve stiahnutý
+            now_ts=now, last_market_data_ts=now - 5,
             last_ws_message_ts=self._last_ws_ts,
             last_rest_ok_ts=now - 5,
             exchange_heartbeat_ok=True,
-            open_order_count=0,            # paper trading — žiadne reálne ordery
-            stale_order_count=0,
-            order_reject_streak=self._reject_streak,
-            cancel_streak=0, replace_streak=0,
-            actions_last_minute=0,
-            max_actions_per_minute=15,
-            desync_detected=False,
-            unknown_order_states=0,
+            open_order_count=0, stale_order_count=0,
+            order_reject_streak=0, cancel_streak=0, replace_streak=0,
+            actions_last_minute=0, max_actions_per_minute=15,
+            desync_detected=False, unknown_order_states=0,
             symbol=self.cfg_sym.binance_symbol,
         )
-        from step13_execution_safety_v2 import ExecutionSnapshot as ES
-        exec_dec = self.exec_ctrl.evaluate(ES(**vars(exec_snap)))
+        exec_dec = self.exec_ctrl.evaluate(exec_snap)
 
-        # ── 3. Market regime ──────────────────────────────────────────────────
+        # 3. Market regime
         regime_dec = self.regime_det.update(klines)
-
-        # Loguj prechod
         if regime_dec.regime_changed:
-            from step19_decision_audit import TransitionAuditEntry, TransitionDomain
             self.auditor.log_transition(TransitionAuditEntry(
                 tick=self._tick,
                 domain=TransitionDomain.REGIME.value,
@@ -256,30 +189,25 @@ class PaperTradingBot:
             ))
             self._last_regime = regime_dec.effective_regime.value
 
-        # ── 4. Portfolio risk ─────────────────────────────────────────────────
+        # 4. Portfolio risk
         pv = self.tracker.portfolio_value(price)
         if pv > self._peak_value:
             self._peak_value = pv
 
-        from step11_portfolio_risk import PortfolioRiskSnapshot
         port_snap = PortfolioRiskSnapshot(
-            portfolio_value=pv,
-            peak_today=self._peak_value,
+            portfolio_value=pv, peak_today=self._peak_value,
             peak_rolling=self._peak_value,
             realized_pnl_today=self.tracker.realized_pnl,
             unrealized_pnl=self.tracker.unrealized_pnl(price),
             total_exposure=self.tracker.coin_balance * price,
             max_symbol_exposure=self.tracker.coin_balance * price,
-            stop_loss_today=0,
-            stop_loss_this_week=0,
-            dca_today=0,
+            stop_loss_today=0, stop_loss_this_week=0, dca_today=0,
             market_regime=regime_dec.effective_regime.value,
-            volatility_regime=regime_dec.score_breakdown.atr_pct.__class__.__name__,
+            volatility_regime="NORMAL",
         )
         port_dec = self.port_risk.evaluate(port_snap)
 
-        # ── 5. Inventory risk ─────────────────────────────────────────────────
-        from step12_inventory_risk import InventorySnapshot
+        # 5. Inventory risk
         inv_snap = InventorySnapshot(
             coin_qty=self.tracker.coin_balance,
             coin_market_value=self.tracker.coin_balance * price,
@@ -289,13 +217,11 @@ class PaperTradingBot:
             unrealized_pnl=self.tracker.unrealized_pnl(price),
             market_regime=regime_dec.effective_regime.value,
             volatility_regime="NORMAL",
-            recent_buy_count=0,
-            recent_sell_count=0,
+            recent_buy_count=0, recent_sell_count=0,
         )
-        inv_dec = self.inv_manager.evaluate(inv_snap)
+        inv_dec = self.inv_mgr.evaluate(inv_snap)
 
-        # ── 6. Decision engine ────────────────────────────────────────────────
-        from step15_decision_engine import DecisionInputs
+        # 6. Decision engine
         inputs = DecisionInputs(
             exec_safe_to_trade=exec_dec.safe_to_trade,
             exec_block_new_orders=exec_dec.block_new_orders,
@@ -323,25 +249,20 @@ class PaperTradingBot:
             inv_force_reduction=inv_dec.force_inventory_reduction,
             inv_buy_size_mult=inv_dec.buy_size_multiplier,
             vol_regime="NORMAL",
-            vol_allow_dca=True,
-            vol_allow_new_buys=True,
-            vol_order_size_mult=1.0,
-            vol_max_exposure_mult=1.0,
+            vol_allow_dca=True, vol_allow_new_buys=True,
+            vol_order_size_mult=1.0, vol_max_exposure_mult=1.0,
         )
         outcome = self.engine.decide(inputs)
 
-        # ── 7. Audit log rozhodnutia ──────────────────────────────────────────
-        from step19_decision_audit import DecisionAuditEntry
+        # 7. Audit
         self.auditor.log_decision(DecisionAuditEntry(
-            tick=self._tick,
-            symbol=SYMBOL,
+            tick=self._tick, symbol=SYMBOL,
             exec_state=exec_dec.state.value,
             effective_regime=regime_dec.effective_regime.value,
             regime_confidence=regime_dec.confidence,
             portfolio_risk_mode=port_dec.mode.value,
             inventory_state=inv_dec.inventory_state.value,
-            vol_regime="NORMAL",
-            dca_state="NORMAL",
+            vol_regime="NORMAL", dca_state="NORMAL",
             allow_trading=outcome.allow_trading,
             allow_new_orders=outcome.allow_new_orders,
             allow_new_buys=outcome.allow_new_buys,
@@ -354,21 +275,21 @@ class PaperTradingBot:
             order_size_mult=outcome.order_size_multiplier,
         ))
 
-        # ── 8. Reakcia na rozhodnutie ─────────────────────────────────────────
+        # 8. Reakcia
         if not outcome.allow_trading:
             self.auditor.skip_trading(
-                self._tick, outcome.reason_codes[0] if outcome.reason_codes else "BLOCKED",
+                self._tick,
+                outcome.reason_codes[0] if outcome.reason_codes else "BLOCKED",
                 outcome.winning_layer.value,
             )
-            log.info(f"Tick {self._tick} | ⏸ Obchodovanie blokované | {outcome.explanation[:80]}")
+            log.info(f"Tick {self._tick} | ⏸ {outcome.explanation[:80]}")
             return
 
-        # Paper trading simulácia
         if outcome.allow_new_buys:
-            usdt_per_order = ORDER_AMOUNT_USDT * outcome.order_size_multiplier
-            if usdt_per_order >= self.precision.cfg.min_notional:
-                qty = self.precision.qty_from_usdt(usdt_per_order, price)
-                if qty >= self.precision.cfg.min_qty:
+            usdt = ORDER_AMOUNT_USDT * outcome.order_size_multiplier
+            if usdt >= self.cfg_sym.min_notional:
+                qty = self.precision.qty_from_usdt(usdt, price)
+                if qty >= self.cfg_sym.min_qty:
                     try:
                         self.executor.buy(price, qty)
                         self.auditor.place_buy(self._tick, price, qty)
@@ -381,11 +302,9 @@ class PaperTradingBot:
                 outcome.winning_layer.value,
             )
 
-        # Log stav portfólia každých 10 tickov
         if self._tick % 10 == 0:
             log.info(
-                f"Tick {self._tick} | 💰 {price:.4f} | "
-                f"pv={pv:.2f} | "
+                f"Tick {self._tick} | 💰 {price:.4f} | pv={pv:.2f} USDT | "
                 f"coin={self.tracker.coin_balance:.4f} | "
                 f"uPnL={self.tracker.unrealized_pnl(price):+.2f} | "
                 f"regime={regime_dec.effective_regime.value} "
@@ -393,10 +312,7 @@ class PaperTradingBot:
                 f"winner={outcome.winning_layer.value}"
             )
 
-    # ── Market data ───────────────────────────────────────────────────────────
-
     def _fetch_market_data(self):
-        """Stiahne cenu a klines. Vráti (None, None) pri chybe."""
         if self.conn is None:
             return self._mock_price(), self._mock_klines()
         try:
@@ -409,32 +325,25 @@ class PaperTradingBot:
             return None, None
 
     def _mock_price(self) -> float:
-        """Demo cena pre offline testovanie."""
         import random
-        base = 618.42
-        return round(base + random.gauss(0, base * 0.008), 2)
+        return round(618.42 + random.gauss(0, 618.42 * 0.008), 2)
 
     def _mock_klines(self) -> list:
-        """Demo klines pre offline testovanie."""
         import random
         price, k = 618.0, []
         for _ in range(100):
             rv = price * 0.010
             price += random.gauss(0, rv)
             price = max(price, 1.0)
-            k.append({"open":price-rv*0.1,"high":price+rv*0.5,
-                       "low":price-rv*0.5,"close":price,"volume":100,
-                       "time":datetime.now()})
+            k.append({"open": price-rv*0.1, "high": price+rv*0.5,
+                       "low": price-rv*0.5, "close": price,
+                       "volume": 100, "time": datetime.now()})
         return k
 
-    # ── Shutdown ──────────────────────────────────────────────────────────────
-
     def _shutdown(self):
-        log.info("Uzatváranie paper trading session...")
-        summary = self.auditor.print_session_summary()
+        log.info("Uzatváranie session...")
+        self.auditor.print_session_summary()
         self.auditor.close()
-        uptime = (datetime.now() - self._started_at)
-        log.info(f"Session ukončená | Uptime: {uptime} | Ticky: {self._tick}")
 
     def _sleep(self, seconds: int):
         for _ in range(seconds):
@@ -451,19 +360,16 @@ if __name__ == "__main__":
     log.info("═" * 60)
     log.info(f"  APEX BOT — Paper Trading")
     log.info(f"  Symbol: {SYMBOL} | Mode: {'PAPER' if TEST_MODE else '🔴 LIVE'}")
-    log.info(f"  Base capital: {BASE_CAPITAL} USDT | Daily target: {DAILY_TARGET_USDT} USDT")
+    log.info(f"  Base: {BASE_CAPITAL} USDT | Target: {DAILY_TARGET_USDT} USDT/deň")
     log.info("═" * 60)
 
-    # Pre-flight gate
     if not SKIP_PREFLIGHT:
-        passed = run_preflight()
-        if not passed:
-            log.critical("❌ PRE-FLIGHT GATE FAILED — spustenie zablokované")
+        if not run_preflight():
+            log.critical("❌ PRE-FLIGHT FAILED — zablokované")
             sys.exit(1)
-        log.info("✅ PRE-FLIGHT GATE PASSED — štartujem paper trading")
+        log.info("✅ PRE-FLIGHT PASSED — štartujem")
     else:
-        log.warning("⚠️  SKIP_PREFLIGHT=true — preskakujem overenie (len pre debug!)")
+        log.warning("⚠️  SKIP_PREFLIGHT=true")
 
-    # Spustenie
     bot = PaperTradingBot()
     bot.run()
