@@ -144,8 +144,6 @@ class PaperTradingBot:
             DecisionAuditor, DecisionAuditEntry, TransitionAuditEntry,
             ActionAuditEntry, ActionType, TransitionDomain
         )
-        from step6_guardian import Guardian
-
         # ── Inicializácia modulov ─────────────────────────────────────────────
         self.precision, self.tracker, self.executor = create_bot_stack(
             sym=SYMBOL, mode=TEST_MODE, starting_usdt=BASE_CAPITAL
