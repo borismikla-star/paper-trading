@@ -58,6 +58,10 @@ from step19_decision_audit import (
     ActionAuditEntry, ActionType, TransitionDomain
 )
 from dashboard import start_dashboard, update_state
+from telegram_notify import (
+    notify_startup, notify_heartbeat, notify_regime_change,
+    notify_panic, notify_circuit_breaker, notify_shutdown,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -136,6 +140,7 @@ class PaperTradingBot:
 
         # Dashboard
         start_dashboard(port=int(os.getenv("PORT", "8080")))
+        notify_startup(SYMBOL, BASE_CAPITAL, "PAPER" if TEST_MODE else "LIVE")
 
         log.info("✅ PaperTradingBot pripravený")
 
@@ -191,6 +196,13 @@ class PaperTradingBot:
                 persistence_ticks=regime_dec.persistence_counter,
                 cooldown_ticks=regime_dec.ticks_since_last_change,
             ))
+            notify_regime_change(
+                self._last_regime,
+                regime_dec.effective_regime.value,
+                regime_dec.confidence,
+            )
+            if regime_dec.effective_regime.value == "PANIC":
+                notify_panic(price, pv - BASE_CAPITAL)
             self._last_regime = regime_dec.effective_regime.value
 
         # 4. Portfolio risk
@@ -303,6 +315,18 @@ class PaperTradingBot:
         ))
 
         # 8. Reakcia
+        if exec_dec.trigger_circuit_breaker:
+            notify_circuit_breaker()
+
+        # Heartbeat každých 60 tickov (= každú hodinu pri 60s intervale)
+        if self._tick % 60 == 0:
+            notify_heartbeat(
+                tick=self._tick, price=price, pv=pv,
+                pnl=pv - BASE_CAPITAL,
+                regime=regime_dec.effective_regime.value,
+                uptime_min=int((datetime.now() - self._started_at).total_seconds() // 60),
+            )
+
         if not outcome.allow_trading:
             self.auditor.skip_trading(
                 self._tick,
@@ -369,6 +393,7 @@ class PaperTradingBot:
 
     def _shutdown(self):
         log.info("Uzatváranie session...")
+        notify_shutdown(self._tick, self.tracker.portfolio_value(0) - BASE_CAPITAL)
         self.auditor.print_session_summary()
         self.auditor.close()
 
