@@ -114,8 +114,8 @@ class PaperTradingBot:
         )
         self.cfg_sym    = self.precision.cfg
         self.regime_det = RegimeDetector(RegimeConfig(
-            min_bars=55, persistence_ticks=3, cooldown_ticks=4,
-            smoothing_alpha=0.20, panic_conf_override=0.65,
+            min_bars=55, persistence_ticks=2, cooldown_ticks=2,
+            smoothing_alpha=0.25, panic_conf_override=0.70,
         ))
         self.port_risk  = PortfolioRiskEngine(PortfolioRiskConfig())
         self.inv_mgr    = InventoryRiskManager(InventoryConfig())
@@ -137,6 +137,7 @@ class PaperTradingBot:
         self._peak_value    = BASE_CAPITAL
         self._last_ws_ts    = time.time()
         self._started_at    = datetime.now()
+        self._klines_cache: list = []   # akumulovaná história klines
 
         # Dashboard
         start_dashboard(port=int(os.getenv("PORT", "8080")))
@@ -364,11 +365,13 @@ class PaperTradingBot:
             )
 
     def _fetch_market_data(self):
+        """Stiahne cenu a 1h klines z Binance. Vždy fresh dáta."""
         if self.conn is None:
             return self._mock_price(), self._mock_klines()
         try:
             price  = self.conn.get_price()
-            klines = self.conn.get_klines(interval="1h", limit=100)
+            # Stiahni viac klines pre lepšiu regime detekciu
+            klines = self.conn.get_klines(interval="1h", limit=150)
             self._last_ws_ts = time.time()
             return price, klines
         except Exception as e:
