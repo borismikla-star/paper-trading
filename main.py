@@ -119,7 +119,15 @@ class PaperTradingBot:
         ))
         self.port_risk  = PortfolioRiskEngine(PortfolioRiskConfig())
         self.inv_mgr    = InventoryRiskManager(InventoryConfig())
-        self.exec_ctrl  = ExecutionSafetyController(ExecutionSafetyConfig())
+        self.exec_ctrl  = ExecutionSafetyController(ExecutionSafetyConfig(
+            market_data_stale_sec=120,   # dáta sú stale až po 2 min (tick každú min)
+            ws_stale_sec=300,            # WS stale až po 5 min (paper trading nemá WS)
+            heartbeat_stale_sec=300,     # heartbeat stale až po 5 min
+            rest_stale_sec=300,
+            reject_streak_cb=5,
+            cb_cooldown_sec=120,
+            cb_recovery_ticks=3,
+        ))
         self.engine     = DecisionEngine()
         self.auditor    = DecisionAuditor(SESSION_LOG, symbol=SYMBOL)
 
@@ -173,7 +181,7 @@ class PaperTradingBot:
         # 2. Execution safety
         exec_snap = ExecutionSnapshot(
             now_ts=now, last_market_data_ts=now - 5,
-            last_ws_message_ts=self._last_ws_ts,
+            last_ws_message_ts=now - 5,   # paper trading: považuj za fresh každý tick
             last_rest_ok_ts=now - 5,
             exchange_heartbeat_ok=True,
             open_order_count=0, stale_order_count=0,
